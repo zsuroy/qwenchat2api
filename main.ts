@@ -53,6 +53,107 @@
 
 import { Application, Router, Context, Middleware } from "https://deno.land/x/oak@v12.6.1/mod.ts";
 import { Buffer } from "https://deno.land/std@0.177.0/io/buffer.ts";
+import { S3Client } from "https://deno.land/x/s3@0.5.0/mod.ts";
+import { decode } from "https://deno.land/std@0.208.0/encoding/base64.ts";
+
+
+// --- 1.5. Qwen OSS Upload Logic ---
+
+const UPLOAD_CONFIG = {
+  stsTokenUrl: 'https://chat.qwen.ai/api/v1/files/getstsToken',
+  maxRetries: 3,
+  timeout: 30000,
+};
+
+/**
+ * Requests a temporary STS Token from the Qwen API for file uploads.
+ * Mimics the logic from `requestStsToken` in `upload.js`.
+ */
+async function requestStsToken(filename: string, filesize: number, filetype: string, authToken: string, retryCount = 0): Promise<any> {
+    const bearerToken = authToken.startsWith('Bearer ') ? authToken : `Bearer ${authToken}`;
+    const payload = { filename, filesize, filetype };
+
+    try {
+        const response = await fetch(UPLOAD_CONFIG.stsTokenUrl, {
+            method: 'POST',
+            headers: {
+                'Authorization': bearerToken,
+                'Content-Type': 'application/json',
+                'x-request-id': crypto.randomUUID(),
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            },
+            body: JSON.stringify(payload),
+        });
+
+        if (response.ok) {
+            const stsData = await response.json();
+            // Basic validation
+            if (stsData.access_key_id && stsData.file_url && stsData.bucketname) {
+                return stsData;
+            }
+            throw new Error("Incomplete STS token response received.");
+        }
+
+        throw new Error(`Failed to get STS token: ${response.status} ${response.statusText}`);
+
+    } catch (error) {
+        if (retryCount < UPLOAD_CONFIG.maxRetries) {
+            console.warn(`STS token request failed, retrying (${retryCount + 1}/${UPLOAD_CONFIG.maxRetries})...`, error.message);
+            await new Promise(res => setTimeout(res, 1000 * Math.pow(2, retryCount)));
+            return requestStsToken(filename, filesize, filetype, authToken, retryCount + 1);
+        }
+        console.error("Failed to get STS token after multiple retries.", error);
+        throw error;
+    }
+}
+
+/**
+ * Uploads a file to Qwen's Alibaba Cloud OSS using STS credentials.
+ * @param fileBuffer The file content as a Uint8Array.
+ * @param originalFilename The original name of the file.
+ * @param qwenAuthToken The Qwen authorization token.
+ * @returns The URL and ID of the uploaded file.
+ */
+async function uploadFileToQwenOss(fileBuffer: Uint8Array, originalFilename: string, qwenAuthToken: string): Promise<{ file_url: string, file_id: string }> {
+    const filesize = fileBuffer.length;
+    const mimeType = originalFilename.endsWith('.png') ? 'image/png' :
+                     originalFilename.endsWith('.jpg') || originalFilename.endsWith('.jpeg') ? 'image/jpeg' :
+                     'application/octet-stream';
+    const filetypeSimple = mimeType.startsWith('image/') ? 'image' : 'file';
+
+    // 1. Get STS Token
+    const stsData = await requestStsToken(originalFilename, filesize, filetypeSimple, qwenAuthToken);
+
+    const stsCredentials = {
+        accessKeyID: stsData.access_key_id,
+        secretKey: stsData.access_key_secret,
+        sessionToken: stsData.security_token,
+    };
+    const ossInfo = {
+        bucket: stsData.bucketname,
+        endpoint: stsData.region + '.aliyuncs.com',
+        path: stsData.file_path,
+        region: stsData.region,
+    };
+
+    // 2. Upload to OSS using an S3-compatible client
+    const s3Client = new S3Client({
+        ...stsCredentials,
+        region: ossInfo.region,
+        endpointURL: `https://${ossInfo.endpoint}`,
+    });
+
+    await s3Client.putObject(ossInfo.path, fileBuffer, {
+        bucketName: ossInfo.bucket,
+        contentType: mimeType,
+    });
+
+    return {
+        file_url: stsData.file_url,
+        file_id: stsData.file_id,
+    };
+}
+
 
 // --- 1. Configuration from Environment Variables ---
 
@@ -83,6 +184,90 @@ function getUpstreamToken(): string {
 // --- 2. Core Conversion Logic (from original Node.js project analysis) ---
 
 /**
+ * Asynchronously processes OpenAI messages to handle multimodal content for Qwen.
+ * If a base64 image is found, it's uploaded to OSS, and the message content is updated.
+ * @param messages The array of messages from the OpenAI request.
+ * @param qwenAuthToken The token needed to authenticate with the Qwen upload API.
+ * @returns A promise that resolves to a new array of messages formatted for Qwen.
+ */
+async function processMessagesForQwen(messages: any[], qwenAuthToken: string): Promise<any[]> {
+    if (!messages || !Array.isArray(messages)) {
+        return [];
+    }
+
+    const processedMessages = [];
+    for (const message of messages) {
+        if (message.role === 'user' && Array.isArray(message.content)) {
+            const newContent = [];
+            let hasImage = false;
+
+            for (const part of message.content) {
+                if (part.type === 'image_url' && part.image_url?.url?.startsWith('data:')) {
+                    hasImage = true;
+                    const base64Data = part.image_url.url;
+                    const match = base64Data.match(/^data:(image\/\w+);base64,(.*)$/);
+                    if (!match) {
+                        console.warn("Skipping invalid base64 image data.");
+                        newContent.push({ type: 'text', text: '[Invalid Image Data]' });
+                        continue;
+                    }
+
+                    const [, mimeType, base64] = match;
+                    const fileExtension = mimeType.split('/')[1] || 'png';
+                    const filename = `${crypto.randomUUID()}.${fileExtension}`;
+                    const buffer = decode(base64);
+
+                    try {
+                        const uploadResult = await uploadFileToQwenOss(buffer, filename, qwenAuthToken);
+                        // Replace with Qwen's expected format for uploaded images
+                        newContent.push({ type: 'image', image: uploadResult.file_url });
+                    } catch (e) {
+                        console.error("Failed to upload image to Qwen OSS:", e);
+                        newContent.push({ type: 'text', text: `[Image upload failed: ${e.message}]` });
+                    }
+                } else if (part.type === 'image_url') {
+                    // It's a regular URL, convert to markdown format as a fallback.
+                    newContent.push({ type: 'text', text: `![]( ${part.image_url.url} )` });
+                } else {
+                    newContent.push(part);
+                }
+            }
+            // If there was an image, Qwen expects content to be an array.
+            // If not, it should be a string. This logic might need refinement based on Qwen API behavior.
+            if (hasImage) {
+                 // Flatten text parts into a single string if mixed with images
+                const flattenedContent = [];
+                let textParts = [];
+                for(const item of newContent) {
+                    if (item.type === 'text') {
+                        textParts.push(item.text);
+                    } else {
+                        if (textParts.length > 0) {
+                            flattenedContent.push({ type: 'text', text: textParts.join('\n') });
+                            textParts = [];
+                        }
+                        flattenedContent.push(item);
+                    }
+                }
+                if (textParts.length > 0) {
+                    flattenedContent.push({ type: 'text', text: textParts.join('\n') });
+                }
+                processedMessages.push({ ...message, content: flattenedContent });
+            } else {
+                 // No images, just combine text parts into a single string.
+                const combinedText = message.content.filter(p => p.type === 'text').map(p => p.text).join('\n');
+                processedMessages.push({ ...message, content: combinedText });
+            }
+
+        } else {
+            processedMessages.push(message);
+        }
+    }
+    return processedMessages;
+}
+
+
+/**
  * Transforms an OpenAI-formatted request body into the proprietary Qwen format.
  * This function mimics the logic from `processRequestBody` in `chat-middleware.js`.
  * @param openAIRequest The incoming request body.
@@ -102,7 +287,7 @@ function transformOpenAIRequestToQwen(openAIRequest: any): any {
 
     const qwenBody = {
         "model": qwenModel,
-        "messages": openAIRequest.messages, // Simplified message parsing for playground
+        "messages": openAIRequest.messages, // Messages are now pre-processed
         "stream": true,
         "incremental_output": true,
         "chat_type": chat_type,
@@ -325,6 +510,10 @@ router.post("/v1/chat/completions", async (ctx: Context) => {
 
     try {
         const openAIRequest = await ctx.request.body({ type: "json" }).value;
+
+        // Asynchronously process messages for file uploads before transforming the request
+        openAIRequest.messages = await processMessagesForQwen(openAIRequest.messages, token);
+
         const qwenRequest = transformOpenAIRequestToQwen(openAIRequest);
 
         const headers: Record<string, string> = {

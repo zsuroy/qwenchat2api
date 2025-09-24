@@ -53,7 +53,7 @@
 
 import { Application, Router, Context, Middleware } from "https://deno.land/x/oak@v12.6.1/mod.ts";
 import { Buffer } from "https://deno.land/std@0.177.0/io/buffer.ts";
-import { S3Bucket } from "https://deno.land/x/s3_lite_client@0.7.0/mod.ts";
+import { S3Client } from "https://deno.land/x/s3_lite_client@0.7.0/mod.ts";
 import { decode } from "https://deno.land/std@0.208.0/encoding/base64.ts";
 
 
@@ -136,8 +136,8 @@ async function uploadFileToQwenOss(fileBuffer: Uint8Array, originalFilename: str
         region: stsData.region,
     };
 
-    // 2. Upload to OSS using S3Bucket client
-    const s3Bucket = new S3Bucket({
+    // 2. Upload to OSS using S3Client from s3_lite_client
+    const s3Client = new S3Client({
         accessKeyID: stsCredentials.accessKeyID,
         secretKey: stsCredentials.secretKey,
         sessionToken: stsCredentials.sessionToken,
@@ -146,7 +146,7 @@ async function uploadFileToQwenOss(fileBuffer: Uint8Array, originalFilename: str
         endpointURL: `https://${ossInfo.endpoint}`,
     });
 
-    await s3Bucket.putObject(ossInfo.path, fileBuffer, {
+    await s3Client.putObject(ossInfo.path, fileBuffer, {
         contentType: mimeType,
     });
 

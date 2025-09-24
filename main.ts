@@ -1,7 +1,7 @@
 /**
  * Qwen API to OpenAI Standard - Single File Deno Deploy/Playground Script
  *
- * @version 2.2
+ * @version 2.3
  * @description This script acts as a proxy, converting standard OpenAI API requests
  * into the proprietary format used by `chat.qwen.ai` and transforms the response
  * back into the standard OpenAI format. It incorporates the specific logic
@@ -18,13 +18,16 @@
  *    In your Deno Deploy project settings, add the following environment variables:
  *
  *    - `OPENAI_API_KEY`: (Recommended) Your secret key for clients to access this proxy.
+ *                        If not set, the proxy will be open to the public.
  *                        Example: `sk-my-secret-key-12345`
  *
  *    - `API_KEY`: Your Qwen account token(s) for the upstream API. You can provide
  *                 multiple tokens separated by commas. The script will rotate through them.
+ *                 This is a **required** variable.
  *                 Example: `ey...abc,ey...def`
  *
  *    - `SSXMOD_ITNA`: The special cookie value required for the upstream API.
+ *                     This may be required for certain models or features.
  *                     Example: `mqUxRDBD...DYAEDBYD74G+DDeDixGm...`
  *
  * 3. **Run**:
@@ -32,13 +35,20 @@
  *
  * --- LOCAL USAGE ---
  *
- * 1. Save this file as `playground_full.ts`.
+ * 1. Save this file as `main.ts`.
  * 2. Set environment variables in your terminal:
  *    export OPENAI_API_KEY="your_secret_proxy_key"
  *    export API_KEY="your_qwen_token"
  *    export SSXMOD_ITNA="your_cookie_value"
  * 3. Run the script:
- *    deno run --allow-net --allow-env playground_full.ts
+ *    deno run --allow-net --allow-env main.ts
+ *
+ * --- ABOUT DENO ---
+ * Deno is a modern and secure runtime for JavaScript and TypeScript.
+ * - It has built-in support for TypeScript without a separate compilation step.
+ * - It uses explicit permissions for file, network, and environment access.
+ * - It has a standard library and a decentralized package management system using URLs.
+ * This script is designed to be easily deployable on Deno's serverless platform, Deno Deploy.
  */
 
 import { Application, Router, Context, Middleware } from "https://deno.land/x/oak@v12.6.1/mod.ts";
@@ -246,7 +256,7 @@ router.get("/", (ctx: Context) => {
 
                 <h2>Source Code</h2>
                 <p>The original source code for this project can be found at:</p>
-                <p><a href="https://github.com/highkay" target="_blank">https://github.com/highkay</a></p>
+                <p><a href="https://github.com/highkay/qwenchat2api" target="_blank">https://github.com/highkay/qwenchat2api</a></p>
             </div>
         </body>
         </html>

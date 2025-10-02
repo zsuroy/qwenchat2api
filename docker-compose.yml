@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  qwen-proxy:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Authentication mode (false for client-side, true for server-side)
+      - USE_DENO_ENV=${USE_DENO_ENV:-false}
+      
+      # For server-side authentication mode (USE_DENO_ENV=true)
+      - QWEN_TOKEN=${QWEN_TOKEN}
+      - SSXMOD_ITNA_VALUE=${SSXMOD_ITNA_VALUE}
+      
+      # Optional variables for both modes
+      - SALT=${SALT:-}
+      - DEBUG=${DEBUG:-false}
+    restart: unless-stopped
+    volumes:
+      - ./.env:/app/.env:ro
